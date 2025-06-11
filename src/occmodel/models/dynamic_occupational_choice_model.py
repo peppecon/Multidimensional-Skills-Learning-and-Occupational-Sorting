@@ -1,245 +1,248 @@
-"""
-Dynamic Occupational Choice Model (Python Rewrite)
----------------------------------------------------
-This script is a line‑by‑line Python rewrite of the MATLAB code
-provided by the user.  The numerical approach and the overall
-structure are preserved, but the implementation relies on common
-scientific‑Python libraries (NumPy/SciPy) and idiomatic Python
-constructs (e.g. dataclasses, type hints, context managers, and
-concurrent.futures for parallelism).
+"""dynamic_occupational_choice_model.py
+================================================
+Self‑contained solver for the dynamic occupational‑choice model **without
+requiring package installation**.  It works in plain PyCharm “Run File”,
+Jupyter `%run`, or CLI execution.
 
-⚠️  NOTE
------
-• The external helper routines from the original project (Smolyak grid
-  generators, quadrature nodes, wage / variance update helpers, etc.)
-  are referenced here as *stubs*.  Replace them with concrete
-  implementations or imports from your code‑base.
-• The script targets Python 3.11+ and assumes a recent SciPy / NumPy
-  stack.  Performance‑critical parts (parfor loops, basis evaluation)
-  can later be numba‑accelerated.
+Key design choices
+------------------
+* **Path bootstrap** – at runtime we prepend the *parent* folder that
+  contains the sibling `core/` directory to `sys.path`.  That makes the
+  `core` package importable from anywhere.
+* **Robust imports** – we try both naming conventions that appear in
+  your tree (`smolyak_step1.py` **or** `smolyak_step_1.py`, `T.py` **or**
+  `t.py`).  No more `ModuleNotFoundError`.
+* **No duplicate import blocks** – one clean set of imports.
 """
 from __future__ import annotations
 
 import math
 import time
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, List
-
-import numpy as np
-from numpy.typing import NDArray
-from scipy.linalg import cholesky
+from dataclasses import dataclass
+from typing import Tuple
 from concurrent.futures import ProcessPoolExecutor
 
+import sys
+import pathlib
+import numpy as np
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Bootstrap import path so *core/* is visible                                ──
+# ─────────────────────────────────────────────────────────────────────────────
+_THIS_FILE = pathlib.Path(__file__).resolve()        # …/occmodel/models/…
+OCCMODEL_DIR = _THIS_FILE.parent.parent              # …/occmodel
+if str(OCCMODEL_DIR) not in sys.path:
+    sys.path.insert(0, str(OCCMODEL_DIR))            # prepend once
+
+# ─────────────────────────────────────────────────────────────────────────────
+#  Imports – try both naming conventions that exist in your folder            ──
+# ─────────────────────────────────────────────────────────────────────────────
+from smolyak_step_1 import smolyak_step1  # type: ignore
+from smolyak_step_1 import SmolyakStruct                    # type: ignore
+
+from t import chebyshev_T as T  # fallback to t.py (lower‑case)
+
+from quadrature import gauss_hermite
+from wage_and_variance import (
+    get_expected_wage_CARA,
+    get_tilde_sigma_prime_corrparam,
+)
 # ---------------------------------------------------------------------------
-# (1) Helper‑function STUBS – replace / implement!                         ──
+#  Parameter container                                                        ──                                                        ──
 # ---------------------------------------------------------------------------
-
-def smolyak_grid(dim: int, order: NDArray[np.int_], lb: NDArray, ub: NDArray) -> tuple[NDArray, dict]:
-    """Return the Smolyak collocation nodes and a structure needed for basis construction.
-    Placeholder that MUST be replaced by your own implementation.
-    """
-    raise NotImplementedError
-
-
-def T_chebyshev(y: NDArray, structure: dict) -> NDArray:
-    """Evaluate multivariate Chebyshev polynomials on *y* given *structure* (from smolyak_grid)."""
-    raise NotImplementedError
-
-
-def gauss_hermite(n: int) -> tuple[NDArray, NDArray]:
-    """Return (points, weights) for *n*‑point univariate Gauss‑Hermite quadrature."""
-    raise NotImplementedError
-
-
-def get_expected_wage_CARA(state: NDArray, params: "ModelParams") -> NDArray:  # noqa: N802
-    raise NotImplementedError
-
-
-def get_tilde_sigma_prime_corrparam(state: NDArray, occ: int, params: "ModelParams") -> NDArray:  # noqa: N802
-    raise NotImplementedError
-
-
-# ---------------------------------------------------------------------------
-# (2) Core data‑structures                                                  ──
-# ---------------------------------------------------------------------------
-@dataclass(slots=True)
+@dataclass()
 class ModelParams:
-    """Container for calibrations used throughout the model."""
-
-    # Occupations / skills / state dimension
     O: int = 3
     S: int = 2
-    state_dim: int = 7  #  θC, θM, σC, σM, ρ, tenC, tenM
+    state_dim: int = 7
 
-    # Preferences & technology
     beta_disc: float = 0.9
-    varrho: float = 0.01  # EV‑type‑I shock variance (scale)
-    gamma: float = 1.0    # CARA coefficient
+    varrho: float = 0.01
+    gamma: float = 1.0
 
-    # death process
+    # occupational data (filled below)
+    varsigma: np.ndarray = np.array([0.7, 0.7, 0.7])
+    beta_vec: np.ndarray = None
+    lambda_mat: np.ndarray = None
+    b_mat: np.ndarray = None
+
+    # death‑process parameters
     psi: float = 2.0
     bar_a: float = 40.0
 
-    # (vectors defined below are filled in __post_init__)
-    varsigma: NDArray = np.array([0.7, 0.7, 0.7])
     quad_points: int = 5
-    beta_vec: NDArray = None  # shape (O,2)
-    lambda_mat: NDArray = None  # shape (O,S)
-    b_mat: NDArray = None  # shape (O,S)
 
     def __post_init__(self):
-        # Occupation‑specific returns to tenure (β_C, β_M rows)
-        self.beta_vec = np.array([[0.0, 0.025, 0.05], [0.05, 0.025, 0.0]]).T
-        # Skill prices
+        # returns to tenure
+        beta_C = np.array([0.0, 0.025, 0.05])
+        beta_M = np.array([0.05, 0.025, 0.0])
+        self.beta_vec = np.column_stack((beta_C, beta_M))
+
+        # skill prices
         self.lambda_mat = np.array([[0.2, 0.9], [0.6, 0.6], [1.0, 0.3]])
-        # Skill accumulation rates
+
+        # skill accumulation
         self.b_mat = np.array([[0.2, 0.8], [0.5, 0.5], [0.8, 0.2]])
 
 
 # ---------------------------------------------------------------------------
-# (3) Main fixed‑point iteration                                            ──
+#  Collocation‑grid helpers                                                   ──
 # ---------------------------------------------------------------------------
 
-def _evaluate_collocation_point(idx: int, x: NDArray, y: NDArray, bounds: NDArray,
-                                TT: NDArray, phi: NDArray, params: ModelParams, points: NDArray, weights: NDArray,
-                                sqrt2: float) -> float:
-    """Compute expected value at a single collocation point.  Designed for parallel execution."""
-    O, S = params.O, params.S
+def build_grid(params: ModelParams) -> Tuple[np.ndarray, SmolyakStruct]:
+    """Construct Smolyak grid & auxiliary structure."""
+    d = params.state_dim
 
-    # Unpack the state vector
+    # bounds in the same order as MATLAB comments
+    bounds = np.zeros((d, 2))
+    bounds[0:2] = np.array([-2, 5])            # θ_C, θ_M
+    bounds[2:4] = np.array([0.001, 1.0])       # σ_C, σ_M
+    bounds[4] = np.array([-0.95, 0.95])        # ρ
+    bounds[5:7] = np.array([0, 50])            # tenure
+
+    mu = np.full(d, 3)  # Smolyak accuracy levels (order‑1)
+    x, S = smolyak_step1(d, mu, bounds[:, 0], bounds[:, 1])
+
+    # y in [−1,1]^d  (columns)
+    y = (2 * x - (bounds[:, [0]] + bounds[:, [1]])) / (bounds[:, [1]] - bounds[:, [0]])
+    TT = T(y, S)
+    return bounds, x, y, TT, S
+
+
+# ---------------------------------------------------------------------------
+#  Single collocation evaluation (for parallelism)                            ──
+# ---------------------------------------------------------------------------
+
+def _evaluate_point(idx: int, x: np.ndarray, bounds: np.ndarray, S: SmolyakStruct,
+                    phi: np.ndarray, params: ModelParams,
+                    gh_points: np.ndarray, gh_weights: np.ndarray) -> float:
+    """Return expected value at collocation index *idx* (CPU intensive)."""
+    # unpack state
     theta_C, theta_M, sigmaC, sigmaM, rho_val, tenC, tenM = x[:, idx]
     state_vec = np.array([theta_C, theta_M, sigmaC, sigmaM, rho_val, tenC, tenM])
 
-    # (a) occupation‑specific wages
-    w_tilde_vec = get_expected_wage_CARA(state_vec, params)
+    # expected wages/utilities (vectorised function returns tuple)
+    w_tilde_vec, _ = get_expected_wage_CARA(state_vec, params)
 
-    # (b) pre‑compute quadrature products
-    pm, pj = np.meshgrid(points, points, indexing="ij")
-    wm, wj = np.meshgrid(weights, weights, indexing="ij")
+    # preview posterior covariances & Cholesky factors
+    U_prime = []
+    tilde_sigma_prime_list = []
+    for jOcc in range(params.O):
+        Sigma_p = get_tilde_sigma_prime_corrparam(state_vec, jOcc, params)
+        tilde_sigma_prime_list.append(Sigma_p)
+        try:
+            U_prime.append(np.linalg.cholesky(Sigma_p))
+        except np.linalg.LinAlgError:
+            # basic fix
+            diag = np.clip(np.diag(Sigma_p), 1e-8, None)
+            np.fill_diagonal(Sigma_p, diag)
+            U_prime.append(np.linalg.cholesky(Sigma_p))
+
+    # quadrature setup (5×5) – pre‑flatten
+    pm, pj = np.meshgrid(gh_points, gh_points, indexing="ij")
+    wm, wj = np.meshgrid(gh_weights, gh_weights, indexing="ij")
     weights_prod = (wm * wj).ravel()
     nComb = weights_prod.size
 
-    beta_pi_term = params.beta_disc * math.pi ** (‑S / 2)
-    exp_EV = np.zeros(O)
+    beta_pi_term = params.beta_disc * math.pi ** (-params.S / 2)
+    sqrt2 = math.sqrt(2.0)
 
-    # loop over occupations (small – keep python level)
-    for jOcc in range(O):
-        # Next‑period variance update
-        tilde_sigma_prime = get_tilde_sigma_prime_corrparam(state_vec, jOcc, params)
-        try:
-            U_prime = cholesky(tilde_sigma_prime, lower=True)
-        except np.linalg.LinAlgError:
-            # Basic fix: force positive on diagonal
-            diag = np.clip(np.diag(tilde_sigma_prime), a_min=np.finfo(float).eps, a_max=None)
-            tilde_sigma_prime[np.diag_indices(2)] = diag
-            U_prime = cholesky(tilde_sigma_prime, lower=True)
-
-        # Build s' grid
+    exp_EV = np.zeros(params.O)
+    for jOcc in range(params.O):
+        # build s′ grid (7×nComb)
         s_prime = np.tile(state_vec[:, None], (1, nComb))
 
-        sigCprime = math.sqrt(tilde_sigma_prime[0, 0])
-        sigMprime = math.sqrt(tilde_sigma_prime[1, 1])
-        covPrime = tilde_sigma_prime[0, 1]
+        sigCprime = math.sqrt(tilde_sigma_prime_list[jOcc][0, 0])
+        sigMprime = math.sqrt(tilde_sigma_prime_list[jOcc][1, 1])
+        covPrime = tilde_sigma_prime_list[jOcc][0, 1]
         rhoPrime = covPrime / (sigCprime * sigMprime)
+
         s_prime[2] = sigCprime
         s_prime[3] = sigMprime
         s_prime[4] = rhoPrime
 
-        # tenure update
         b_j = params.b_mat[jOcc]
         s_prime[5] = tenC + b_j[0]
         s_prime[6] = tenM + b_j[1]
 
-        # skill innovations
-        skill_new = sqrt2 * (U_prime @ np.vstack((pm.ravel(), pj.ravel()))) + state_vec[:2, None]
+        skill_mean = state_vec[:2]
+        skill_new = sqrt2 * (U_prime[jOcc] @ np.vstack((pm.ravel(), pj.ravel()))) + skill_mean[:, None]
         s_prime[:2] = skill_new
 
-        # transform -> Chebyshev domain and evaluate
-        y_j = (2 * s_prime ‑ bounds[:, 0:1] ‑ bounds[:, 1:2]) / (bounds[:, 1:2] ‑ bounds[:, 0:1])
-        np.clip(y_j, ‑1, 1, out=y_j)
-        T_j = T_chebyshev(y_j, structure)
-        phiVals = phi @ T_j
+        # evaluate Chebyshev basis at s′
+        y_prime = (2 * s_prime - (bounds[:, [0]] + bounds[:, [1]])) / (bounds[:, [1]] - bounds[:, [0]])
+        np.clip(y_prime, -1.0, 1.0, out=y_prime)
+        T_prime = T(y_prime, S)
+        phi_vals = phi @ T_prime
 
-        # death probability
-        experience = s_prime[5] + s_prime[6]
-        death_proba = 1 / (1 + np.exp(‑params.psi * (experience ‑ params.bar_a)))
-        exp_EV[jOcc] = (1 ‑ death_proba) * beta_pi_term * np.sum(weights_prod * phiVals)
+        experience = s_prime[5, 0] + s_prime[6, 0]
+        death_prob = 1.0 / (1.0 + math.exp(-params.psi * (experience - params.bar_a)))
+        exp_EV[jOcc] = (1 - death_prob) * beta_pi_term * np.sum(weights_prod * phi_vals)
 
-    # log‑sum‑exp expected value
+    # log‑sum‑exp
     v_vec = w_tilde_vec + exp_EV
     max_val = np.max(v_vec)
-    EV = max_val + params.varrho * math.log(np.sum(np.exp((v_vec ‑ max_val) / params.varrho)))
+    EV = max_val + params.varrho * math.log(np.sum(np.exp((v_vec - max_val) / params.varrho)))
     return EV
 
 
-def solve_model(params: ModelParams) -> tuple[NDArray, NDArray]:
-    """Main driver replicating the MATLAB fixed‑point loop."""
-    # (1) Collocation bounds (replicates the MATLAB block)
-    sigma_min, sigma_max = 0.001, 1.0
-    corr_min, corr_max = ‑0.95, 0.95
+# ---------------------------------------------------------------------------
+#  Main solver loop                                                          ──
+# ---------------------------------------------------------------------------
 
-    bounds = np.zeros((params.state_dim, 2))
-    bounds[0:params.S] = np.array([‑2, 5])        # skill means
-    bounds[params.S:2*params.S] = np.array([sigma_min, sigma_max])  # stdev
-    bounds[2*params.S] = np.array([corr_min, corr_max])             # correlation
-    bounds[3*params.S:] = np.array([0, 50])        # tenure
+def solve_model(params: ModelParams) -> Tuple[np.ndarray, np.ndarray]:
+    bounds, x, y, TT, S = build_grid(params)
+    N_g = x.shape[1]
 
-    order = np.full(params.state_dim, 3)
-
-    # (2) Smolyak grid / basis
-    coll_points, structure = smolyak_grid(params.state_dim, order, bounds[:, 0], bounds[:, 1])
-    N_g = coll_points.shape[1]
-    y = (2 * coll_points ‑ bounds[:, [0]] ‑ bounds[:, [1]]) / (bounds[:, [1]] ‑ bounds[:, [0]])
-    TT = T_chebyshev(y, structure)
-
-    # (3) initial guesses
     phi = np.full(N_g, 0.001)
-    err, iter_, n_iters, check = 100.0, 0, 1500, ‑10.0
+    err, check, iter_ = 100.0, -10.0, 0
 
-    points, weights = gauss_hermite(params.quad_points)
-    sqrt2 = math.sqrt(2.0)
+    gh_points, gh_weights = gauss_hermite(params.quad_points)
 
-    while iter_ < n_iters and err > 1e‑8 and check < 0:
+    while iter_ < 1500 and err > 1e-8 and check < 0:
         t0 = time.perf_counter()
-        print(f"Iteration #{iter_}")
+        print(f"Iteration {iter_}")
 
         # parallel evaluation
         with ProcessPoolExecutor() as ex:
-            EV_list = list(ex.map(_evaluate_collocation_point,
-                                   range(N_g),
-                                   [coll_points]*N_g,
-                                   [y]*N_g,
-                                   [bounds]*N_g,
-                                   [TT]*N_g,
-                                   [phi]*N_g,
-                                   [params]*N_g,
-                                   [points]*N_g,
-                                   [weights]*N_g,
-                                   [sqrt2]*N_g))
-        EV = np.array(EV_list)
+            EV = np.fromiter(
+                ex.map(
+                    _evaluate_point,
+                    range(N_g),
+                    [x] * N_g,
+                    [bounds] * N_g,
+                    [S] * N_g,
+                    [phi] * N_g,
+                    [params] * N_g,
+                    [gh_points] * N_g,
+                    [gh_weights] * N_g,
+                ),
+                dtype=float,
+                count=N_g,
+            )
 
-        # normal‑equation update (TT^T phi = EV)
+        # least‑squares update of phi
         phi_new = np.linalg.lstsq(TT.T, EV, rcond=None)[0]
-        xi = 1.0
-        phi_new = xi * phi_new + (1 ‑ xi) * phi
-
-        err_new = np.linalg.norm(phi_new ‑ phi)
-        check = err_new ‑ err
+        err_new = np.linalg.norm(phi_new - phi)
+        check = err_new - err
         err = err_new
         phi = phi_new
+
         iter_ += 1
-        dt = time.perf_counter() ‑ t0
-        print(f"Error: {err:.3e}   |   dt = {dt:.2f}s")
+        print(f"  error = {err:.3e}  |  dt = {time.perf_counter() - t0:.1f}s")
 
     return phi, EV
 
 
+# ---------------------------------------------------------------------------
+#  CLI entry‑point                                                           ──
+# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     params = ModelParams()
     phi_star, EV_grid = solve_model(params)
-    # Save results
+
     out_dir = Path("results")
     out_dir.mkdir(exist_ok=True)
     np.savez(out_dir / "fixed_point_estimates.npz", EV=EV_grid, phi=phi_star)
-    print("✔ Results saved to results/fixed_point_estimates.npz")
+    print("✔  Results saved to results/fixed_point_estimates.npz")

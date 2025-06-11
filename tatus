@@ -1,0 +1,75 @@
+[1mdiff --git a/src/fig/hazard_rate.png b/src/fig/hazard_rate.png[m
+[1mindex 69a25cd..1e56a92 100644[m
+Binary files a/src/fig/hazard_rate.png and b/src/fig/hazard_rate.png differ
+[1mdiff --git a/src/fig/u_shape.png b/src/fig/u_shape.png[m
+[1mindex 69143bf..9098e6a 100644[m
+Binary files a/src/fig/u_shape.png and b/src/fig/u_shape.png differ
+[1mdiff --git a/src/occmodel/models/dynamic_occupational_choice_model.py b/src/occmodel/models/dynamic_occupational_choice_model.py[m
+[1mindex 6e84aad..b8281b0 100644[m
+[1m--- a/src/occmodel/models/dynamic_occupational_choice_model.py[m
+[1m+++ b/src/occmodel/models/dynamic_occupational_choice_model.py[m
+[36m@@ -1,245 +1,248 @@[m
+[31m-"""[m
+[31m-Dynamic Occupational Choice Model (Python Rewrite)[m
+[31m----------------------------------------------------[m
+[31m-This script is a line‑by‑line Python rewrite of the MATLAB code[m
+[31m-provided by the user.  The numerical approach and the overall[m
+[31m-structure are preserved, but the implementation relies on common[m
+[31m-scientific‑Python libraries (NumPy/SciPy) and idiomatic Python[m
+[31m-constructs (e.g. dataclasses, type hints, context managers, and[m
+[31m-concurrent.futures for parallelism).[m
+[31m-[m
+[31m-⚠️  NOTE[m
+[31m------[m
+[31m-• The external helper routines from the original project (Smolyak grid[m
+[31m-  generators, quadrature nodes, wage / variance update helpers, etc.)[m
+[31m-  are referenced here as *stubs*.  Replace them with concrete[m
+[31m-  implementations or imports from your code‑base.[m
+[31m-• The script targets Python 3.11+ and assumes a recent SciPy / NumPy[m
+[31m-  stack.  Performance‑critical parts (parfor loops, basis evaluation)[m
+[31m-  can later be numba‑accelerated.[m
+[32m+[m[32m"""dynamic_occupational_choice_model.py[m
+[32m+[m[32m================================================[m
+[32m+[m[32mSelf‑contained solver for the dynamic occupational‑choice model **without[m
+[32m+[m[32mrequiring package installation**.  It works in plain PyCharm “Run File”,[m
+[32m+[m[32mJupyter `%run`, or CLI execution.[m
+[32m+[m
+[32m+[m[32mKey design choices[m
+[32m+[m[32m------------------[m
+[32m+[m[32m* **Path bootstrap** – at runtime we prepend the *parent* folder that[m
+[32m+[m[32m  contains the sibling `core/` directory to `sys.path`.  That makes the[m
+[32m+[m[32m  `core` package importable from anywhere.[m
+[32m+[m[32m* **Robust imports** – we try both naming conventions that appear in[m
+[32m+[m[32m  your tree (`smolyak_step1.py` **or** `smolyak_step_1.py`, `T.py` **or**[m
+[32m+[m[32m  `t.py`).  No more `ModuleNotFoundError`.[m
+[32m+[m[32m* **No duplicate import blocks** – one clean set of imports.[m
+ """[m
+ from __future__ import annotations[m
+ [m
+ import math[m
+ import time[m
+[31m-from dataclasses import dataclass[m
+ from pathlib import Path[m
+[31m-from typing import Callable, List[m
+[31m-[m
+[31m-import numpy as np[m
+[31m-from numpy.typing import NDArray[m
+[31m-from scipy.linalg import cholesky[m
+[32m+[m[32mfrom dataclasses import dataclass[m
+[32m+[m[32mfrom typing import Tuple[m
+ from concurrent.futures import ProcessPoolExecutor[m
+ [m
+[31m-# ---------------------------------------------------------------------------[m
+[31m-# (1) Helper‑function STUBS – replace / implement!                         ──[m
+[31m-# ---------------------------------------------------------------------------[m
+[31m-[m
+[31m-def smolyak_grid(dim: int, order: NDArray[np.int_], lb: NDArray, ub: NDArray) -> tuple[NDArray, dict]:[m
+[31m-    """Return the Smolyak collocation nodes and a structure needed for basis construction.[m
+[31m-    Placeholder that MUST be replaced by your own implementation.[m
+[31m-    """[m
+[31m-    raise NotImplementedError[m
+[31m-[m
+[31m-[m
+[31m-def T_chebyshev(y: NDArray, structure: dict) -> NDArray:[m
+[31m-    """Evaluate multivariate Chebyshev polynomials on *y* given *structure* (from smolyak_grid)."""[m
+[31m-    rais
