@@ -239,6 +239,8 @@ def solve_model(params: ModelParams) -> Tuple[np.ndarray, np.ndarray]:
 #  CLI entry‑point                                                           ──
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
+    import time
+    t0 = time.perf_counter()          # ── start stopwatch ──
     params = ModelParams()
     phi_star, EV_grid = solve_model(params)
 
