@@ -303,18 +303,18 @@ if __name__ == "__main__":
         # phi_loaded = np.zeros(100)  # length must match basis; adjust as needed
 
     # ----------------- run simulation ------------------------------------------
-    occ, xst, wages, death = forward_simulation(phi_loaded, params, P=1000, n_workers=2000)
+    occ, xst, wages, death = forward_simulation(phi_loaded, params, P=150, n_workers=500)
     print("Simulation finished – building plots …")
 
     # total experience (τ_C + τ_M)
     exp_mat = xst[5] + xst[6]   # shape n×P
 
     # --------- drop first P_x periods before plotting -----------------------
-    P_x = 300                     # number of periods to skip at the start
-    occ_plot   = occ[:, P_x:]
-    wages_plot = wages[:, P_x:]
-    death_plot = death[:, P_x:]
-    exp_plot   = exp_mat[:, P_x:]
+    P_x = 0                     # number of periods to skip at the start
+    occ_plot   = occ[:, P_x:-1]
+    wages_plot = wages[:, P_x:-1]
+    death_plot = death[:, P_x:-1]
+    exp_plot   = exp_mat[:, P_x:-1]
 
     FIG_DIR = _THIS.parents[2] / "fig"
     plot_u_shape(occ_plot, wages_plot, death_plot, out=FIG_DIR / "u_shape.png")
