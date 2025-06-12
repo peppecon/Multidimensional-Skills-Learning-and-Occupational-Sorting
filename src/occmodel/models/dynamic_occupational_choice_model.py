@@ -246,3 +246,6 @@ if __name__ == "__main__":
     out_dir.mkdir(exist_ok=True)
     np.savez(out_dir / "fixed_point_estimates.npz", EV=EV_grid, phi=phi_star)
     print("✔  Results saved to results/fixed_point_estimates.npz")
+    dt = time.perf_counter() - t0     # ── elapsed seconds ──
+    print(f"✔  Results saved to results/fixed_point_estimates.npz")
+    print(f"⏱  Total run-time: {dt:,.1f} s")
