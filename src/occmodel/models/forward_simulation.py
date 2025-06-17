@@ -44,6 +44,7 @@ from wage_and_variance import (
 )
 from ev_conditional import compute_cond_EV_CARA
 
+
 # ---------------------------------------------------------------------------
 #  Parameters
 # ---------------------------------------------------------------------------
@@ -70,6 +71,7 @@ class ModelParams:
         self.lambda_mat = np.array([[0.2, 0.9], [0.6, 0.6], [1.0, 0.3]])
         self.b_mat = np.array([[0.2, 0.8], [0.5, 0.5], [0.8, 0.2]])
 
+
 # ---------------------------------------------------------------------------
 #  Posterior mean update helper
 # ---------------------------------------------------------------------------
@@ -89,9 +91,11 @@ def update_posterior_mean(
     rhs = np.linalg.inv(Sigma_old) @ theta_old + lam_j * (signal / sigma_eps_sq)
     return Sigma_post @ rhs
 
+
 # ---------------------------------------------------------------------------
 #  Grid helper
 # ---------------------------------------------------------------------------
+
 
 def build_grid(params: ModelParams):
     bounds = np.zeros((params.d, 2))
@@ -106,6 +110,7 @@ def build_grid(params: ModelParams):
 # ---------------------------------------------------------------------------
 #  Forward simulation (with mean updates)
 # ---------------------------------------------------------------------------
+
 
 def forward_simulation(phi: NDArray, params: ModelParams, *, P=150, n_workers=300):
     bounds, S = build_grid(params)
@@ -290,9 +295,10 @@ def plot_hazard(occ: NDArray, exp_mat: NDArray, death: NDArray, *, nbins=50, out
 #  Main run                                                                   ──
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
+    import time                       # ← add
     params = ModelParams()
 
-    # try loading fixed‑point estimates -------------------------------------
+    # try loading fixed-point estimates -------------------------------------
     res_path = _THIS.parents[2] / "occmodel" / "models" / "results" / "fixed_point_estimates.npz"
     if res_path.exists():
         data = np.load(res_path)
@@ -300,17 +306,20 @@ if __name__ == "__main__":
         print(f"Loaded phi from {res_path.relative_to(_THIS.parents[2])}")
     else:
         warnings.warn("phi not found – using zeros (simulation will be rough)")
-        # phi_loaded = np.zeros(100)  # length must match basis; adjust as needed
+        phi_loaded = np.zeros(100)    # make sure length matches your basis
 
-    # ----------------- run simulation ------------------------------------------
-    occ, xst, wages, death = forward_simulation(phi_loaded, params, P=150, n_workers=500)
-    print("Simulation finished – building plots …")
+    # ----------------- run simulation --------------------------------------
+    t0 = time.perf_counter()          # ← start timer
+    occ, xst, wages, death = forward_simulation(phi_loaded, params,
+                                                P=150, n_workers=300)
+    sim_time = time.perf_counter() - t0
+    print(f"Simulation finished in {sim_time:,.2f} s – building plots …")
 
     # total experience (τ_C + τ_M)
-    exp_mat = xst[5] + xst[6]   # shape n×P
+    exp_mat = xst[5] + xst[6]         # shape (n, P)
 
-    # --------- drop first P_x periods before plotting -----------------------
-    P_x = 0                     # number of periods to skip at the start
+    # --------- drop first P_x periods before plotting ----------------------
+    P_x = 0                           # number of periods to skip at the start
     occ_plot   = occ[:, P_x:-1]
     wages_plot = wages[:, P_x:-1]
     death_plot = death[:, P_x:-1]
@@ -320,4 +329,6 @@ if __name__ == "__main__":
     plot_u_shape(occ_plot, wages_plot, death_plot, out=FIG_DIR / "u_shape.png")
     plot_hazard(occ_plot, exp_plot, death_plot, out=FIG_DIR / "hazard_rate.png")
 
-    print("✓  Figures saved to", FIG_DIR)
+    total_time = time.perf_counter() - t0
+    print(f"✓  Figures saved to {FIG_DIR}")
+    print(f"🏁  End-to-end runtime: {total_time:,.2f} s")

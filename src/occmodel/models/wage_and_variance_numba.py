@@ -18,9 +18,14 @@ def get_expected_wage_CARA_nb(state_vec,
     tau     = state_vec[5:7]          # (2,)
 
     sigmaC, sigmaM, rho = state_vec[2], state_vec[3], state_vec[4]
-    Sigma = np.array([[sigmaC*sigmaC,      rho*sigmaC*sigmaM],
-                      [rho*sigmaC*sigmaM,  sigmaM*sigmaM]])
+    # Sigma = np.array([[sigmaC*sigmaC,      rho*sigmaC*sigmaM],
+    #                   [rho*sigmaC*sigmaM,  sigmaM*sigmaM]])
 
+    Sigma = np.empty((2, 2), dtype=state_vec.dtype)
+    Sigma[0, 0] = sigmaC * sigmaC
+    Sigma[0, 1] = rho * sigmaC * sigmaM
+    Sigma[1, 0] = Sigma[0, 1]
+    Sigma[1, 1] = sigmaM * sigmaM
     mu  = lambda_mat @ theta + beta_mat @ tau        # (O,)
     # ----------  only this block changed  ----------
     tmp = (lambda_mat @ Sigma) * lambda_mat          # O×2

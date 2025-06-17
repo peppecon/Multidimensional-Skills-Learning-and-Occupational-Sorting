@@ -17,6 +17,7 @@ if TYPE_CHECKING:                     # avoid circular import at run-time
 
 __all__ = ["chebyshev_T"]
 
+
 # ────────────────────────────────────────────────────────────────────────
 #  1.  Small helper: make sure y is (N, d)
 # ────────────────────────────────────────────────────────────────────────
